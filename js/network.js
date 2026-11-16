@@ -1,0 +1,546 @@
+import { loadFirebaseConfig, isFirebaseConfigured } from './firebase-config.js';
+
+const FIREBASE_APP_CDN = 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+const FIREBASE_DB_CDN = 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' }
+];
+
+/**
+ * Layer Multiplayer / Co-op Realtime cross-browser (iPhone / Android / Desktop):
+ * 1) Firebase Realtime Database (se configurato in firebase-config.js o dal modale)
+ * 2) PeerJS WebRTC P2P automatico via Internet con solo link/codice stanza (zero server/account richiesti)
+ * 3) BroadcastChannel + snapshot localStorage simultanei per schede locali sullo stesso dispositivo
+ */
+export class RealtimeNetwork {
+  constructor(handlers = {}) {
+    this.handlers = handlers;
+    this.playerId = `p-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36).slice(-4)}`;
+    this.roomId = 'solo';
+    this.mode = 'local'; // 'local' | 'p2p' | 'firebase'
+    this.coopRole = 'host'; // 'host' | 'guest' | 'solo'
+    this.statusLabel = 'Singleplayer';
+    this.remotePlayers = new Map();
+
+    this.channel = null;
+    this.peer = null;
+    this.peerConns = new Set();
+    this._retryTimer = null;
+    this._sessionToken = 0;
+    this._lastSnapshot = null;
+
+    this.fbDb = null;
+    this.fbApi = null;
+    this.unsubFns = [];
+    this.syncAccum = 0;
+    this.processedHits = new Set();
+    this.processedEvents = new Set();
+  }
+
+  _storageKey(room) {
+    return `maze_royale_room_snapshot_${room}`;
+  }
+
+  _hostPeerId(room) {
+    return `mazeroyale-v11-${String(room || '').toLowerCase()}`;
+  }
+
+  saveLocalSnapshot(snapshot) {
+    if (this.coopRole === 'solo' || !this.roomId || this.roomId === 'solo') return;
+    try {
+      localStorage.setItem(this._storageKey(this.roomId), JSON.stringify({ ...snapshot, updatedAt: Date.now() }));
+    } catch (_) {}
+  }
+
+  loadLocalSnapshot(room) {
+    try {
+      const raw = localStorage.getItem(this._storageKey(room));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && Date.now() - (parsed.updatedAt || 0) < 3600 * 1000) {
+        return parsed;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  async connect(roomId = 'labyrinth-1', role = 'solo') {
+    this.disconnect();
+    const myToken = this._sessionToken;
+    this.coopRole = role;
+    const cleanRoom = String(roomId || 'labyrinth-1').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 24) || '1000';
+    this.roomId = cleanRoom;
+
+    if (role === 'solo') {
+      this.mode = 'local';
+      this.statusLabel = 'Singleplayer';
+      this.handlers.onStatusChange?.(this.statusLabel, 'solo');
+      return;
+    }
+
+    const fbCfg = loadFirebaseConfig();
+    if (isFirebaseConfigured(fbCfg)) {
+      try {
+        await this._connectFirebase(fbCfg, myToken);
+        return;
+      } catch (err) {
+        console.warn('Firebase connection failed, falling back to PeerJS/local:', err);
+      }
+    }
+
+    this._connectLocalAndP2P(myToken);
+  }
+
+  _connectLocalAndP2P(myToken) {
+    this.mode = 'local';
+    this.statusLabel = `CO-OP (${this.roomId})`;
+    this.handlers.onStatusChange?.(this.statusLabel, this.mode);
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      this.channel = new BroadcastChannel(`maze_royale_${this.roomId}`);
+      this.channel.onmessage = (ev) => this._handlePeerMessage(ev.data, null);
+      this.channel.postMessage({ type: 'HELLO', from: this.playerId, role: this.coopRole, at: Date.now() });
+    }
+
+    if (this.coopRole === 'guest') {
+      const snap = this.loadLocalSnapshot(this.roomId);
+      if (snap) {
+        this.handlers.onFullRoomSync?.(snap);
+      }
+    }
+
+    if (typeof window !== 'undefined' && typeof window.Peer === 'function') {
+      this._initPeerJS(myToken);
+    }
+  }
+
+  _initPeerJS(myToken, hostRetries = 0) {
+    if (myToken !== this._sessionToken) return;
+    const peerOpts = { debug: 0, config: { iceServers: ICE_SERVERS } };
+    const hostPeerId = this._hostPeerId(this.roomId);
+
+    if (this.coopRole === 'host') {
+      let peer;
+      try {
+        peer = new window.Peer(hostPeerId, peerOpts);
+      } catch (_) {
+        return;
+      }
+      this.peer = peer;
+      this.mode = 'p2p';
+
+      peer.on('open', () => {
+        if (myToken !== this._sessionToken) return;
+        this.statusLabel = `CO-OP Link (${this.roomId})`;
+        this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
+      });
+
+      peer.on('connection', (conn) => {
+        if (myToken !== this._sessionToken) {
+          try { conn.close(); } catch (_) {}
+          return;
+        }
+        this._attachDataConn(conn, myToken);
+      });
+
+      peer.on('error', (err) => {
+        if (myToken !== this._sessionToken) return;
+        if (err?.type === 'unavailable-id' && hostRetries < 3) {
+          try { peer.destroy(); } catch (_) {}
+          this.peer = null;
+          clearTimeout(this._retryTimer);
+          this._retryTimer = setTimeout(() => this._initPeerJS(myToken, hostRetries + 1), 1400);
+          return;
+        }
+        this.statusLabel = `CO-OP Locale (${this.roomId})`;
+        this.handlers.onStatusChange?.(this.statusLabel, 'local');
+      });
+    } else if (this.coopRole === 'guest') {
+      let peer;
+      try {
+        peer = new window.Peer(undefined, peerOpts);
+      } catch (_) {
+        return;
+      }
+      this.peer = peer;
+      this.mode = 'p2p';
+      this.statusLabel = `Connessione ${this.roomId}...`;
+      this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
+
+      let guestAttempts = 0;
+      const dialHost = () => {
+        if (myToken !== this._sessionToken || !this.peer || this.peer.destroyed) return;
+        guestAttempts += 1;
+        let conn;
+        try {
+          conn = this.peer.connect(hostPeerId, { reliable: true });
+        } catch (_) {
+          return;
+        }
+        this._attachDataConn(conn, myToken, () => {
+          if (myToken !== this._sessionToken) return;
+          if (this.peerConns.size === 0 && guestAttempts < 25) {
+            this.statusLabel = `Cerco stanza ${this.roomId}...`;
+            this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
+            clearTimeout(this._retryTimer);
+            this._retryTimer = setTimeout(dialHost, 2000);
+          }
+        });
+      };
+
+      peer.on('open', () => {
+        if (myToken !== this._sessionToken) return;
+        dialHost();
+      });
+
+      peer.on('error', (err) => {
+        if (myToken !== this._sessionToken) return;
+        if (err?.type === 'peer-unavailable' && guestAttempts < 25) {
+          this.statusLabel = `In attesa Host (${this.roomId})...`;
+          this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
+          clearTimeout(this._retryTimer);
+          this._retryTimer = setTimeout(dialHost, 2000);
+        }
+      });
+    }
+  }
+
+  _attachDataConn(conn, myToken, onClosedNoPeers = null) {
+    if (!conn) return;
+    let opened = false;
+
+    const handleOpen = () => {
+      if (opened || myToken !== this._sessionToken) return;
+      opened = true;
+      this.peerConns.add(conn);
+      clearTimeout(this._retryTimer);
+      this.statusLabel = `CO-OP Online (${this.roomId})`;
+      this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
+
+      try {
+        conn.send({ type: 'HELLO', from: this.playerId, role: this.coopRole, at: Date.now() });
+        if (this.coopRole === 'host' && this._lastSnapshot) {
+          conn.send({ type: 'FULL_SYNC', from: this.playerId, snapshot: this._lastSnapshot });
+        }
+      } catch (_) {}
+    };
+
+    if (conn.open) {
+      handleOpen();
+    } else {
+      conn.on('open', handleOpen);
+    }
+
+    conn.on('data', (msg) => {
+      if (myToken !== this._sessionToken) return;
+      if (msg && msg.from) conn._remotePid = msg.from;
+      this._handlePeerMessage(msg, conn);
+    });
+
+    const cleanup = () => {
+      this.peerConns.delete(conn);
+      if (conn._remotePid && this.remotePlayers.has(conn._remotePid)) {
+        this.remotePlayers.delete(conn._remotePid);
+        this.handlers.onPlayersUpdate?.(this.remotePlayers);
+      }
+      if (myToken === this._sessionToken && this.peerConns.size === 0 && typeof onClosedNoPeers === 'function') {
+        onClosedNoPeers();
+      }
+    };
+
+    conn.on('close', cleanup);
+    conn.on('error', cleanup);
+  }
+
+  _broadcastLocalAndP2P(msg, excludeConn = null) {
+    if (this.channel) {
+      try {
+        this.channel.postMessage(msg);
+      } catch (_) {}
+    }
+    for (const conn of this.peerConns) {
+      if (conn === excludeConn || !conn.open) continue;
+      try {
+        conn.send(msg);
+      } catch (_) {}
+    }
+  }
+
+  _handlePeerMessage(msg, sourceConn = null) {
+    if (!msg || msg.from === this.playerId) return;
+
+    // Se l'host ha piu' peer connessi, inoltra i messaggi P2P agli altri peer
+    if (sourceConn && this.coopRole === 'host' && ['STATE', 'PAGE_EVENT', 'CHEST_OPENED', 'LEVEL_ADVANCE', 'BYE'].includes(msg.type)) {
+      for (const conn of this.peerConns) {
+        if (conn !== sourceConn && conn.open) {
+          try { conn.send(msg); } catch (_) {}
+        }
+      }
+    }
+
+    if (msg.type === 'HELLO') {
+      this.handlers.onPeerHello?.(msg.from);
+    } else if (msg.type === 'ROOM_META') {
+      this.handlers.onRoomMeta?.(msg.meta);
+    } else if (msg.type === 'FULL_SYNC') {
+      this.handlers.onFullRoomSync?.(msg.snapshot);
+    } else if (msg.type === 'STATE') {
+      this.remotePlayers.set(msg.state.id, { ...msg.state, lastSeen: Date.now() });
+      this.handlers.onPlayersUpdate?.(this.remotePlayers);
+    } else if (msg.type === 'BYE') {
+      this.remotePlayers.delete(msg.from);
+      this.handlers.onPlayersUpdate?.(this.remotePlayers);
+    } else if (msg.type === 'HIT' && msg.targetId === this.playerId) {
+      if (!this.processedHits.has(msg.hitId)) {
+        this.processedHits.add(msg.hitId);
+        this.handlers.onIncomingHit?.(msg);
+      }
+    } else if (msg.type === 'PAGE_EVENT') {
+      this.handlers.onPageEvent?.(msg.event);
+    } else if (msg.type === 'CHEST_OPENED') {
+      this.handlers.onChestOpened?.(msg.chestId);
+    } else if (msg.type === 'LEVEL_ADVANCE') {
+      this.handlers.onLevelAdvance?.(msg.level, msg.seed, msg.winnerName, msg.victory);
+    }
+  }
+
+  async _connectFirebase(fbCfg, myToken) {
+    const appMod = await import(FIREBASE_APP_CDN);
+    const dbMod = await import(FIREBASE_DB_CDN);
+    if (myToken !== this._sessionToken) return;
+
+    const appName = `maze_${this.roomId}_${Date.now()}`;
+    const app = appMod.initializeApp(fbCfg, appName);
+    const db = dbMod.getDatabase(app);
+
+    this.fbApi = dbMod;
+    this.fbDb = db;
+    this.mode = 'firebase';
+    this.statusLabel = `CO-OP Online (${this.roomId})`;
+    this.handlers.onStatusChange?.(this.statusLabel, this.mode);
+
+    const base = `rooms/${this.roomId}`;
+    const playerRef = dbMod.ref(db, `${base}/players/${this.playerId}`);
+    dbMod.onDisconnect(playerRef).remove();
+
+    if (this.coopRole === 'guest') {
+      try {
+        const metaSnap = await dbMod.get(dbMod.ref(db, `${base}/meta`));
+        if (myToken !== this._sessionToken) return;
+        if (metaSnap.exists()) {
+          this.handlers.onFullRoomSync?.(metaSnap.val());
+        }
+      } catch (_) {}
+    }
+
+    const playersRef = dbMod.ref(db, `${base}/players`);
+    this.unsubFns.push(
+      dbMod.onValue(playersRef, (snap) => {
+        const val = snap.val() || {};
+        this.remotePlayers.clear();
+        const now = Date.now();
+        for (const [pid, p] of Object.entries(val)) {
+          if (pid === this.playerId || !p) continue;
+          if (now - (p.updatedAt || now) > 25000) continue;
+          this.remotePlayers.set(pid, { ...p, id: pid, lastSeen: now });
+        }
+        this.handlers.onPlayersUpdate?.(this.remotePlayers);
+      })
+    );
+
+    const myHitsRef = dbMod.ref(db, `${base}/hits/${this.playerId}`);
+    this.unsubFns.push(
+      dbMod.onValue(myHitsRef, (snap) => {
+        const hits = snap.val();
+        if (!hits) return;
+        for (const [hitId, payload] of Object.entries(hits)) {
+          if (this.processedHits.has(hitId)) continue;
+          this.processedHits.add(hitId);
+          this.handlers.onIncomingHit?.(payload);
+          dbMod.remove(dbMod.ref(db, `${base}/hits/${this.playerId}/${hitId}`)).catch(() => null);
+        }
+      })
+    );
+
+    const metaRef = dbMod.ref(db, `${base}/meta`);
+    this.unsubFns.push(
+      dbMod.onValue(metaRef, (snap) => {
+        const meta = snap.val();
+        if (!meta) return;
+        if (meta.victory && !this.processedEvents.has(`vic_${meta.eventId}`)) {
+          this.processedEvents.add(`vic_${meta.eventId}`);
+          this.handlers.onLevelAdvance?.(meta.level, meta.seed, meta.winnerName, true);
+          return;
+        }
+        if (meta.seed) {
+          this.handlers.onFullRoomSync?.(meta);
+        }
+      })
+    );
+
+    const eventsRef = dbMod.ref(db, `${base}/worldEvents`);
+    this.unsubFns.push(
+      dbMod.onValue(eventsRef, (snap) => {
+        const ev = snap.val();
+        if (!ev) return;
+        if (ev.pageEvent && ev.pageEvent.from !== this.playerId && !this.processedEvents.has(ev.pageEvent.eid)) {
+          this.processedEvents.add(ev.pageEvent.eid);
+          this.handlers.onPageEvent?.(ev.pageEvent);
+        }
+        if (ev.lastChest && ev.lastChest.from !== this.playerId && !this.processedEvents.has(ev.lastChest.eid)) {
+          this.processedEvents.add(ev.lastChest.eid);
+          this.handlers.onChestOpened?.(ev.lastChest.chestId);
+        }
+      })
+    );
+  }
+
+  publishFullRoomSync(snapshot) {
+    if (this.coopRole === 'solo') return;
+    this._lastSnapshot = snapshot;
+    this.saveLocalSnapshot(snapshot);
+    if (this.mode === 'firebase' && this.fbDb) {
+      const { ref, set } = this.fbApi;
+      set(ref(this.fbDb, `rooms/${this.roomId}/meta`), { ...snapshot, updatedAt: Date.now() }).catch(() => null);
+    } else {
+      this._broadcastLocalAndP2P({ type: 'FULL_SYNC', from: this.playerId, snapshot });
+    }
+  }
+
+  publishRoomMeta(meta) {
+    if (this.coopRole === 'solo') return;
+    this.publishFullRoomSync(meta);
+  }
+
+  publishPlayerState(dt, player, spawnSlot = 'A') {
+    if (this.coopRole === 'solo') return;
+    this.syncAccum += dt;
+    if (this.syncAccum < 0.05) return;
+    this.syncAccum = 0;
+
+    const payload = {
+      id: this.playerId,
+      name: player.name,
+      spawnSlot,
+      x: Number(player.x.toFixed(3)),
+      z: Number(player.z.toFixed(3)),
+      rotY: Number(player.rotY.toFixed(3)),
+      hp: Math.round(player.hp),
+      maxHp: Math.round(player.maxHp),
+      shieldActive: player.shieldActive,
+      attacking: player.attackTimer > 0,
+      alive: player.alive,
+      pagesCount: player.collectedPages.length,
+      updatedAt: Date.now()
+    };
+
+    if (this.mode === 'firebase' && this.fbDb) {
+      const { ref, set } = this.fbApi;
+      set(ref(this.fbDb, `rooms/${this.roomId}/players/${this.playerId}`), payload).catch(() => null);
+    } else {
+      this._broadcastLocalAndP2P({ type: 'STATE', from: this.playerId, state: payload });
+    }
+  }
+
+  sendHit(targetId, damage, fromX, fromZ) {
+    if (this.coopRole === 'solo') return;
+    const hitId = `${this.playerId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const payload = { hitId, targetId, fromId: this.playerId, damage, fromX, fromZ, at: Date.now() };
+    if (this.mode === 'firebase' && this.fbDb) {
+      const { ref, set } = this.fbApi;
+      set(ref(this.fbDb, `rooms/${this.roomId}/hits/${targetId}/${hitId}`), payload).catch(() => null);
+    } else {
+      this._broadcastLocalAndP2P({ type: 'HIT', from: this.playerId, ...payload });
+    }
+  }
+
+  publishPageEvent(event) {
+    if (this.coopRole === 'solo') return;
+    const payload = { ...event, eid: `${this.playerId}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, from: this.playerId, at: Date.now() };
+    if (this.mode === 'firebase' && this.fbDb) {
+      const { ref, set } = this.fbApi;
+      set(ref(this.fbDb, `rooms/${this.roomId}/worldEvents/pageEvent`), payload).catch(() => null);
+    } else {
+      this._broadcastLocalAndP2P({ type: 'PAGE_EVENT', from: this.playerId, event: payload });
+    }
+  }
+
+  publishChestOpened(chestId) {
+    if (this.coopRole === 'solo') return;
+    const payload = { chestId, eid: `${this.playerId}_${Date.now()}`, from: this.playerId, at: Date.now() };
+    if (this.mode === 'firebase' && this.fbDb) {
+      const { ref, set } = this.fbApi;
+      set(ref(this.fbDb, `rooms/${this.roomId}/worldEvents/lastChest`), payload).catch(() => null);
+    } else {
+      this._broadcastLocalAndP2P({ type: 'CHEST_OPENED', from: this.playerId, chestId });
+    }
+  }
+
+  publishLevelAdvance(level, seed, winnerName, victory = false) {
+    if (this.coopRole === 'solo') return;
+    const snapshot = {
+      level,
+      seed,
+      winnerName,
+      victory,
+      collectedPages: [],
+      openedChests: [],
+      eventId: `${Date.now()}_${Math.random().toString(36).slice(2, 5)}`
+    };
+    this._lastSnapshot = snapshot;
+    this.saveLocalSnapshot(snapshot);
+    if (this.mode === 'firebase' && this.fbDb) {
+      const { ref, set } = this.fbApi;
+      set(ref(this.fbDb, `rooms/${this.roomId}/meta`), { ...snapshot, updatedAt: Date.now() }).catch(() => null);
+    } else {
+      this._broadcastLocalAndP2P({ type: 'LEVEL_ADVANCE', from: this.playerId, level, seed, winnerName, victory });
+    }
+  }
+
+  pruneStaleLocalPeers() {
+    if (this.mode === 'firebase') return;
+    const now = Date.now();
+    for (const [id, p] of this.remotePlayers.entries()) {
+      if (now - (p.lastSeen || 0) > 7000) {
+        this.remotePlayers.delete(id);
+      }
+    }
+  }
+
+  disconnect() {
+    this._sessionToken += 1;
+    clearTimeout(this._retryTimer);
+    this._retryTimer = null;
+    this._lastSnapshot = null;
+
+    for (const u of this.unsubFns) {
+      try { u(); } catch (_) {}
+    }
+    this.unsubFns = [];
+
+    if (this.mode === 'firebase' && this.fbDb && this.fbApi) {
+      const { ref, remove } = this.fbApi;
+      remove(ref(this.fbDb, `rooms/${this.roomId}/players/${this.playerId}`)).catch(() => null);
+    }
+
+    this._broadcastLocalAndP2P({ type: 'BYE', from: this.playerId });
+
+    for (const conn of this.peerConns) {
+      try { conn.close(); } catch (_) {}
+    }
+    this.peerConns.clear();
+
+    if (this.peer) {
+      try { this.peer.destroy(); } catch (_) {}
+      this.peer = null;
+    }
+
+    if (this.channel) {
+      try { this.channel.close(); } catch (_) {}
+      this.channel = null;
+    }
+    this.remotePlayers.clear();
+  }
+}

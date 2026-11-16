@@ -1,0 +1,10 @@
+{
+  "name": "Maze Royale - Dark Labyrinth",
+  "short_name": "Maze Royale",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000"
+}

@@ -1,0 +1,58 @@
+// Configurazione globale di "Maze Royale - Dark Labyrinth"
+
+export const CONFIG = {
+  CELL_SIZE: 4.5,
+  WALL_HEIGHT: 3.6,
+  PLAYER_SIZE: 1.38,
+  PLAYER_RADIUS: 0.72,
+  PLAYER_SPEED: 10.8,
+  SHIELD_SPEED_MULT: 0.62,
+  DASH_SPEED: 25.5,
+  DASH_DURATION: 0.20,
+  DASH_COOLDOWN: 1.45,
+  INTERACT_RADIUS: 3.0,
+
+  PLAYER_MAX_HP: 100,
+  BASE_SWORD_DAMAGE: 25,
+  ATTACK_RANGE: 2.35,
+  ATTACK_RADIUS: 1.35,
+  ATTACK_OFFSET_Z: 1.55,
+  ATTACK_DURATION: 0.22,
+  ATTACK_COOLDOWN: 0.34,
+
+  TORCH_RANGE: 20.0,
+  TORCH_INTENSITY: 28,
+  TORCH_DECAY: 0.85,
+  FOG_NEAR: 27.5,
+  FOG_FAR: 46.0,
+
+  BOT_SIZE: 1.3,
+  BOT_RADIUS: 0.68,
+  BOT_MAX_HP: 40,
+  BOT_SPEED: 4.0,
+  BOT_DAMAGE: 14,
+  BOT_ATTACK_COOLDOWN: 1.15,
+  BOT_KNOCKBACK_SPEED: 16.5,
+  BOT_KNOCKBACK_FRICTION: 8.5,
+  BOT_STUN_TIME: 0.18,
+
+  RESPAWN_SECONDS: 3,
+  WRONG_CODE_DAMAGE: 20,
+  MAX_LEVELS: 5,
+
+  SYMBOLS: ['◈', '△', '◇', '⊕', '⋈', '✦', '⏣', '❖'],
+
+  CAMERA: {
+    HEIGHT: 21.5,
+    OFFSET_Z: 13.5,
+    LOOK_AHEAD_Z: 0.0,
+    FOLLOW_LERP: 10.5,
+    FOV: 58
+  }
+};
+
+export function getMazeSizeForLevel(level) {
+  const lvl = Math.min(CONFIG.MAX_LEVELS, Math.max(1, Math.floor(level || 1)));
+  // Crescita marcata tra un livello e l'altro: L1=13x13, L2=21x21, L3=29x29, L4=37x37, L5=45x45
+  return 5 + lvl * 8;
+}

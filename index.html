@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="it">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta name="theme-color" content="#070709" />
+  <title>Maze Royale — Dark Labyrinth</title>
+  <link rel="manifest" href="./manifest.json" />
+  <style>
+    html, body { background: #000; margin: 0; overflow: hidden; }
+    .hidden { display: none !important; }
+    #loading-screen { position: fixed; inset: 0; z-index: 150; background: #000; }
+    #game-canvas { visibility: hidden; }
+  </style>
+  <link rel="stylesheet" href="./style.css?v=13" />
+</head>
+
+<body>
+  <!-- Su localhost disattiva eventuali vecchi Service Worker cachati -->
+  <script>
+    (function () {
+      var isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      if (isLocal && 'serviceWorker' in navigator && navigator.serviceWorker.controller && !sessionStorage.getItem('sw_cleared_v13')) {
+        sessionStorage.setItem('sw_cleared_v13', '1');
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          Promise.all(regs.map(function (r) { return r.unregister(); })).then(function () {
+            if (window.caches) {
+              caches.keys().then(function (ks) {
+                Promise.all(ks.map(function (k) { return caches.delete(k); })).then(function () {
+                  location.reload();
+                });
+              });
+            } else {
+              location.reload();
+            }
+          });
+        });
+      }
+    })();
+  </script>
+
+  <!-- 1. Schermata di Caricamento Fullscreen (5s garantiti) -->
+  <div id="loading-screen" class="loading-screen" aria-label="Caricamento in corso">
+    <img id="loading-bg" class="loading-bg" src="./assets/loading-bg.jpg?v=13" alt="Maze Royale Splash" />
+    <div class="loading-vignette"></div>
+    <div class="loading-bar-wrap">
+      <div class="loading-header">
+        <span class="loading-label">CARICAMENTO</span>
+        <span id="loading-percent" class="loading-percent">0%</span>
+      </div>
+      <div class="loading-track">
+        <div id="loading-fill" class="loading-fill"></div>
+      </div>
+      <div id="loading-step" class="loading-step">Inizializzazione labirinto oscuro...</div>
+    </div>
+  </div>
+
+  <!-- 2. Menu Principale -->
+  <main id="main-menu" class="main-menu hidden" aria-label="Menu Principale">
+    <div class="menu-bg-blur"></div>
+    <div class="menu-panel">
+      <div class="menu-tag">EDIZIONE ARCADE 3D</div>
+      <h1 class="menu-title">MAZE ROYALE</h1>
+      <div class="menu-subtitle">DARK LABYRINTH</div>
+      <p class="menu-desc">
+        Esplora il labirinto oscuro con la tua torcia, raccogli i 5 simboli segreti, respingi i guardiani e sblocca la
+        porta centrale.
+      </p>
+
+      <div class="menu-buttons">
+        <button id="btn-menu-single" type="button" class="menu-btn primary">
+          ⚔️ SINGLEPLAYER (5 LIVELLI)
+        </button>
+        <button id="btn-menu-coop" type="button" class="menu-btn coop">
+          🤝 CO-OP CON CODICE
+        </button>
+        <button id="btn-menu-multi" type="button" class="menu-btn secondary">
+          ⚙️ STANZA / IMPOSTAZIONI FIREBASE
+        </button>
+      </div>
+
+      <div class="menu-controls-hint">
+        <span><strong>PC:</strong> WASD/Frecce • Spazio Attacco • F Scudo • Shift Scatto • E Apri • ESC Pausa</span>
+        <span><strong>Touch / Controller:</strong> Stick SX Muovi • Stick DX Mira • A/R2 Attacco • L1/L2 Scudo • B/R1
+          Scatto • Y Apri</span>
+      </div>
+    </div>
+  </main>
+
+  <canvas id="game-canvas"></canvas>
+
+  <!-- HUD Principale -->
+  <header id="hud-top" class="hidden">
+    <div id="hud-left">
+      <div class="hp-card">
+        <div class="hp-bar-track">
+          <div id="hp-fill" class="hp-bar-fill"></div>
+          <span id="hp-text" class="hp-bar-label">100 / 100 HP</span>
+        </div>
+        <div id="stats-line" class="stats-line">Spada: 25 DMG • Bot: 5 • PvP: 0</div>
+      </div>
+    </div>
+
+    <div id="hud-center">
+      <div id="level-badge" class="level-badge">LIVELLO 1 (15×15)</div>
+      <div id="page-slots" class="page-slots" aria-label="Slot 5 fogli">
+        <div class="hud-slot">1</div>
+        <div class="hud-slot">2</div>
+        <div class="hud-slot">3</div>
+        <div class="hud-slot">4</div>
+        <div class="hud-slot">5</div>
+      </div>
+    </div>
+
+    <div id="hud-right">
+      <div id="net-status" class="net-pill">Locale (labyrinth-1)</div>
+      <button id="btn-open-net" type="button" class="top-btn"
+        title="Multiplayer / Firebase / Nuovo Labirinto">STANZA</button>
+      <button id="btn-hud-pause" type="button" class="top-btn pause-btn" title="Pausa (ESC)">⏸ PAUSA</button>
+    </div>
+  </header>
+
+  <!-- Notifica contestuale -->
+  <div id="toast-banner" class="toast-banner"></div>
+  <div id="damage-flash" class="damage-flash"></div>
+
+  <!-- Joystick virtuale dinamico (compare ovunque tocchi nella meta' sinistra) -->
+  <div id="joystick-zone" class="hidden" aria-label="Area Joystick Movimento">
+    <div id="joystick-base" class="joystick-base">
+      <div id="joystick-knob" class="joystick-knob"></div>
+    </div>
+  </div>
+
+  <!-- Pulsantiera Destra -->
+  <div id="action-cluster" class="hidden">
+    <div class="cluster-top">
+      <button id="btn-interact" type="button" class="act-btn act-interact">
+        <span class="btn-title">✋</span>
+        <span class="btn-sub">APRI</span>
+      </button>
+      <button id="btn-dash" type="button" class="act-btn act-dash" title="Scatto / Dash (Shift / K / RB / Cerchio)">
+        <div class="cd-fill"></div>
+        <span class="btn-title">💨</span>
+        <span class="btn-sub">SCATTO</span>
+      </button>
+    </div>
+    <div class="cluster-bottom">
+      <button id="btn-shield" type="button" class="act-btn act-shield"
+        title="Scudo Frontale (Tieni premuto / F / L1 / L2)">
+        <span class="btn-title">🛡️</span>
+        <span class="btn-sub">SCUDO</span>
+      </button>
+      <button id="btn-attack" type="button" class="act-btn act-attack"
+        title="Attacco Spada (Spazio / J / R2 / Quadrato / Croce)">
+        <span class="btn-title">⚔️</span>
+        <span class="btn-sub">ATTACCO</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Schermata Rossa Game Over Arcade -->
+  <div id="death-overlay" class="death-overlay hidden">
+    <div class="death-title">SEI MORTO</div>
+    <div class="death-sub">GAME OVER — La spedizione nel labirinto è terminata.</div>
+    <div id="death-stats" class="death-stats"></div>
+    <div class="death-actions">
+      <button id="btn-restart-arcade" type="button" class="ui-btn primary death-btn">RIGIOCA (LIVELLO 1)</button>
+      <button id="btn-respawn-pvp" type="button" class="ui-btn secondary death-btn hidden">RESPAWN IN STANZA
+        (PvP)</button>
+      <button id="btn-death-menu" type="button" class="ui-btn death-btn">🏠 MENU PRINCIPALE</button>
+    </div>
+    <div id="death-hint" class="death-timer">Premi SPAZIO / INVIO o ✕/A sul Controller per ricominciare</div>
+  </div>
+
+  <!-- Modale Pausa (ESC) -->
+  <div id="modal-pause" class="modal-backdrop hidden">
+    <div class="modal-card pause-card">
+      <h2>GIOCO IN PAUSA</h2>
+      <p class="modal-sub">La partita è sospesa. Premi <strong>ESC</strong> per riprendere o scegli un'opzione:</p>
+      <div id="pause-coop-share" class="coop-section hidden">
+        <div class="coop-label">CODICE STANZA: <span id="pause-coop-code">MR7K2</span></div>
+        <button id="btn-pause-share" type="button" class="ui-btn secondary coop-full-btn">📤 CONDIVIDI / COPIA LINK INVITO</button>
+      </div>
+      <div class="pause-actions">
+        <button id="btn-pause-resume" type="button" class="ui-btn primary">▶ RIPRENDI</button>
+        <button id="btn-pause-restart" type="button" class="ui-btn secondary">🔄 RICOMINCIA (LIVELLO 1)</button>
+        <button id="btn-pause-menu" type="button" class="ui-btn">🏠 TORNA AL MENU PRINCIPALE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay Vittoria Campagna (5 Livelli Completati) -->
+  <div id="victory-overlay" class="victory-overlay hidden">
+    <div class="victory-badge">🏆 CAMPAGNA COMPLETATA 🏆</div>
+    <h1 class="victory-title">LABIRINTO CONQUISTATO!</h1>
+    <p class="victory-sub">Tutti e 5 i livelli (fino a 45×45) sono stati superati!</p>
+    <p id="victory-stats" class="death-stats"></p>
+    <div class="death-actions">
+      <button id="btn-victory-restart" type="button" class="ui-btn primary death-btn">⚔️ NUOVA PARTITA</button>
+      <button id="btn-victory-menu" type="button" class="ui-btn death-btn">🏠 MENÙ PRINCIPALE</button>
+    </div>
+  </div>
+
+  <!-- Modale Co-Op con Codice Stanza -->
+  <div id="modal-coop" class="modal-backdrop hidden">
+    <div class="modal-card coop-card">
+      <h2>🤝 MODALITÀ CO-OP CON CODICE</h2>
+      <p class="modal-sub">
+        Condividi il codice con il tuo amico: i fogli raccolti sono condivisi tra entrambi e se uno sblocca il portale
+        centrale avanzate insieme (5 livelli progressivi)!
+      </p>
+
+      <div class="coop-section">
+        <div class="coop-label">1. OSPITA PARTITA CO-OP (SPAWN A)</div>
+        <div class="coop-code-row">
+          <div id="coop-host-code" class="coop-code-box">MR7K2P9Q</div>
+          <button id="btn-coop-copy" type="button" class="ui-btn secondary">CODICE</button>
+        </div>
+        <div id="coop-invite-link" class="coop-link-box" title="Link diretto Co-op"></div>
+        <button id="btn-coop-share" type="button" class="ui-btn secondary coop-full-btn">📤 CONDIVIDI / COPIA LINK INVITO</button>
+        <button id="btn-coop-host" type="button" class="ui-btn primary coop-full-btn">🚀 CREA MONDO CO-OP</button>
+      </div>
+
+      <div class="coop-divider">OPPURE</div>
+
+      <div class="coop-section">
+        <label class="field-label">
+          2. ENTRA NEL MONDO DI UN AMICO (SPAWN B)
+          <input id="inp-coop-code" type="text" maxlength="240" placeholder="Codice (es. MR7K2P) o Link Invito"
+            autocomplete="off" />
+        </label>
+        <button id="btn-coop-join" type="button" class="ui-btn secondary coop-full-btn">🔑 ENTRA CON CODICE / LINK</button>
+      </div>
+
+      <div class="modal-actions">
+        <button id="btn-coop-close" type="button" class="ui-btn">CHIUDI (ESC)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modale Combinazione Porta Finale (Centro 0,0) -->
+  <div id="modal-door" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2>PORTA DEL LABIRINTO</h2>
+      <p id="door-hint" class="modal-sub"></p>
+
+      <div id="door-code-slots" class="door-code-slots"></div>
+      <div id="door-keypad" class="door-keypad"></div>
+
+      <div class="modal-actions">
+        <button id="btn-door-clear" type="button" class="ui-btn secondary">CANCELLA</button>
+        <button id="btn-door-submit" type="button" class="ui-btn primary">CONFERMA CODICE</button>
+        <button id="btn-door-close" type="button" class="ui-btn">CHIUDI</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modale Multiplayer / Firebase / Rigenera -->
+  <div id="modal-net" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2>MULTIPLAYER & STANZA</h2>
+      <p class="modal-sub">Senza chiavi usa BroadcastChannel (PvP tra schede dello stesso browser). Per giocare online
+        tra dispositivi diversi incolla la tua configurazione Firebase Realtime Database.</p>
+
+      <label class="field-label">ID Stanza
+        <input id="inp-room" type="text" value="labyrinth-1" />
+      </label>
+
+      <label class="field-label">Punto di Spawn
+        <select id="inp-spawn-side">
+          <option value="A">Spawn A (Basso a Sinistra)</option>
+          <option value="B">Spawn B (Alto a Destra)</option>
+        </select>
+      </label>
+
+      <label class="field-label">Firebase Config JSON oppure `databaseURL` (opzionale)
+        <textarea id="inp-fb-json" rows="4"
+          placeholder='{"apiKey":"...","databaseURL":"https://...firebaseio.com","projectId":"..."}'></textarea>
+      </label>
+
+      <div class="modal-actions">
+        <button id="btn-new-maze" type="button" class="ui-btn secondary">NUOVO LABIRINTO</button>
+        <button id="btn-clear-fb" type="button" class="ui-btn">USA LOCALE</button>
+        <button id="btn-save-net" type="button" class="ui-btn primary">APPLICA</button>
+        <button id="btn-close-net" type="button" class="ui-btn">CHIUDI</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="file-warning" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2>AVVIO DA SERVER RICHIESTO</h2>
+      <p class="modal-sub">Hai aperto <code>index.html</code> direttamente come file locale (<code>file://</code>). I
+        moduli JavaScript 3D richiedono un server HTTP locale.</p>
+      <p class="modal-sub">Fai doppio clic su <strong>AVVIA_MAZE_ROYALE.bat</strong> nella cartella del gioco per
+        avviarlo su <code>http://localhost:8088/</code>.</p>
+    </div>
+  </div>
+
+  <script>
+    if (window.location.protocol === 'file:') {
+      document.getElementById('file-warning')?.classList.remove('hidden');
+    }
+  </script>
+  <script src="./vendor/peerjs.min.js"></script>
+  <script type="module" src="./js/main.js?v=13"></script>
+</body>
+
+</html>
