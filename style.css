@@ -135,7 +135,7 @@ html, body {
   padding: 16px;
   overflow-y: auto;
   touch-action: pan-y;
-  background: #05050a url('./assets/loading-bg.jpg?v=13') center / cover no-repeat;
+  background: #05050a url('./assets/loading-bg.jpg?v=14') center / cover no-repeat;
 }
 
 .menu-bg-blur {
@@ -264,6 +264,20 @@ html, body {
 .pause-btn {
   background: rgba(126, 34, 206, 0.85);
   border-color: rgba(216, 180, 254, 0.5);
+}
+
+.music-btn {
+  min-width: 34px;
+  font-size: 13px;
+  background: rgba(15, 118, 110, 0.85);
+  border-color: rgba(94, 234, 212, 0.55);
+}
+
+.music-btn.muted,
+.music-toggle-btn.muted {
+  background: rgba(51, 65, 85, 0.85);
+  border-color: rgba(148, 163, 184, 0.45);
+  color: #94a3b8;
 }
 
 .pause-card {

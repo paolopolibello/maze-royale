@@ -17,7 +17,7 @@
     #loading-screen { position: fixed; inset: 0; z-index: 150; background: #000; }
     #game-canvas { visibility: hidden; }
   </style>
-  <link rel="stylesheet" href="./style.css?v=13" />
+  <link rel="stylesheet" href="./style.css?v=14" />
 </head>
 
 <body>
@@ -25,8 +25,8 @@
   <script>
     (function () {
       var isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-      if (isLocal && 'serviceWorker' in navigator && navigator.serviceWorker.controller && !sessionStorage.getItem('sw_cleared_v13')) {
-        sessionStorage.setItem('sw_cleared_v13', '1');
+      if (isLocal && 'serviceWorker' in navigator && navigator.serviceWorker.controller && !sessionStorage.getItem('sw_cleared_v14')) {
+        sessionStorage.setItem('sw_cleared_v14', '1');
         navigator.serviceWorker.getRegistrations().then(function (regs) {
           Promise.all(regs.map(function (r) { return r.unregister(); })).then(function () {
             if (window.caches) {
@@ -46,7 +46,7 @@
 
   <!-- 1. Schermata di Caricamento Fullscreen (5s garantiti) -->
   <div id="loading-screen" class="loading-screen" aria-label="Caricamento in corso">
-    <img id="loading-bg" class="loading-bg" src="./assets/loading-bg.jpg?v=13" alt="Maze Royale Splash" />
+    <img id="loading-bg" class="loading-bg" src="./assets/loading-bg.jpg?v=14" alt="Maze Royale Splash" />
     <div class="loading-vignette"></div>
     <div class="loading-bar-wrap">
       <div class="loading-header">
@@ -81,6 +81,9 @@
         </button>
         <button id="btn-menu-multi" type="button" class="menu-btn secondary">
           ⚙️ STANZA / IMPOSTAZIONI FIREBASE
+        </button>
+        <button id="btn-menu-music" type="button" class="menu-btn secondary music-toggle-btn">
+          🔊 MUSICA: ON
         </button>
       </div>
 
@@ -119,6 +122,7 @@
 
     <div id="hud-right">
       <div id="net-status" class="net-pill">Locale (labyrinth-1)</div>
+      <button id="btn-hud-music" type="button" class="top-btn music-btn" title="Musica ON / OFF">🔊</button>
       <button id="btn-open-net" type="button" class="top-btn"
         title="Multiplayer / Firebase / Nuovo Labirinto">STANZA</button>
       <button id="btn-hud-pause" type="button" class="top-btn pause-btn" title="Pausa (ESC)">⏸ PAUSA</button>
@@ -188,6 +192,7 @@
       </div>
       <div class="pause-actions">
         <button id="btn-pause-resume" type="button" class="ui-btn primary">▶ RIPRENDI</button>
+        <button id="btn-pause-music" type="button" class="ui-btn music-toggle-btn">🔊 MUSICA: ON</button>
         <button id="btn-pause-restart" type="button" class="ui-btn secondary">🔄 RICOMINCIA (LIVELLO 1)</button>
         <button id="btn-pause-menu" type="button" class="ui-btn">🏠 TORNA AL MENU PRINCIPALE</button>
       </div>
@@ -308,7 +313,7 @@
     }
   </script>
   <script src="./vendor/peerjs.min.js"></script>
-  <script type="module" src="./js/main.js?v=13"></script>
+  <script type="module" src="./js/main.js?v=14"></script>
 </body>
 
 </html>

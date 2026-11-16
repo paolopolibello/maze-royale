@@ -35,6 +35,9 @@ export class RealtimeNetwork {
     this.fbApi = null;
     this.unsubFns = [];
     this.syncAccum = 0;
+    this._stateSeq = 0;
+    this._prevPubPos = null;
+    this._prevPubMs = 0;
     this.processedHits = new Set();
     this.processedEvents = new Set();
   }
@@ -175,18 +178,26 @@ export class RealtimeNetwork {
         guestAttempts += 1;
         let conn;
         try {
-          conn = this.peer.connect(hostPeerId, { reliable: true });
+          conn = this.peer.connect(hostPeerId, { label: 'ctrl', reliable: true });
         } catch (_) {
           return;
         }
         this._attachDataConn(conn, myToken, () => {
           if (myToken !== this._sessionToken) return;
-          if (this.peerConns.size === 0 && guestAttempts < 25) {
+          const hasCtrl = [...this.peerConns].some((c) => c.label !== 'pos');
+          if (!hasCtrl && guestAttempts < 25) {
             this.statusLabel = `Cerco stanza ${this.roomId}...`;
             this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
             clearTimeout(this._retryTimer);
             this._retryTimer = setTimeout(dialHost, 2000);
           }
+        }, () => {
+          // Apre subito il secondo canale veloce non-ordinato 'pos' (UDP-like) per posizioni fluide a 30Hz senza blocchi
+          if (myToken !== this._sessionToken || !this.peer || this.peer.destroyed) return;
+          try {
+            const posConn = this.peer.connect(hostPeerId, { label: 'pos', reliable: false });
+            this._attachDataConn(posConn, myToken);
+          } catch (_) {}
         });
       };
 
@@ -207,14 +218,17 @@ export class RealtimeNetwork {
     }
   }
 
-  _attachDataConn(conn, myToken, onClosedNoPeers = null) {
+  _attachDataConn(conn, myToken, onClosedNoPeers = null, onCtrlOpened = null) {
     if (!conn) return;
     let opened = false;
+    const isPosChannel = conn.label === 'pos';
 
     const handleOpen = () => {
       if (opened || myToken !== this._sessionToken) return;
       opened = true;
       this.peerConns.add(conn);
+      if (isPosChannel) return;
+
       clearTimeout(this._retryTimer);
       this.statusLabel = `CO-OP Online (${this.roomId})`;
       this.handlers.onStatusChange?.(this.statusLabel, 'p2p');
@@ -225,6 +239,10 @@ export class RealtimeNetwork {
           conn.send({ type: 'FULL_SYNC', from: this.playerId, snapshot: this._lastSnapshot });
         }
       } catch (_) {}
+
+      if (typeof onCtrlOpened === 'function') {
+        onCtrlOpened();
+      }
     };
 
     if (conn.open) {
@@ -235,17 +253,17 @@ export class RealtimeNetwork {
 
     conn.on('data', (msg) => {
       if (myToken !== this._sessionToken) return;
-      if (msg && msg.from) conn._remotePid = msg.from;
+      if (msg && msg.from && !isPosChannel) conn._remotePid = msg.from;
       this._handlePeerMessage(msg, conn);
     });
 
     const cleanup = () => {
       this.peerConns.delete(conn);
-      if (conn._remotePid && this.remotePlayers.has(conn._remotePid)) {
+      if (!isPosChannel && conn._remotePid && this.remotePlayers.has(conn._remotePid)) {
         this.remotePlayers.delete(conn._remotePid);
         this.handlers.onPlayersUpdate?.(this.remotePlayers);
       }
-      if (myToken === this._sessionToken && this.peerConns.size === 0 && typeof onClosedNoPeers === 'function') {
+      if (!isPosChannel && myToken === this._sessionToken && typeof onClosedNoPeers === 'function') {
         onClosedNoPeers();
       }
     };
@@ -260,8 +278,25 @@ export class RealtimeNetwork {
         this.channel.postMessage(msg);
       } catch (_) {}
     }
+
+    if (msg.type === 'STATE') {
+      // Usa il canale veloce 'pos' se aperto; fallback su 'ctrl'
+      const posTargets = [];
+      const fallbackTargets = [];
+      for (const conn of this.peerConns) {
+        if (conn === excludeConn || !conn.open) continue;
+        if (conn.label === 'pos') posTargets.push(conn);
+        else fallbackTargets.push(conn);
+      }
+      const list = posTargets.length > 0 ? posTargets : fallbackTargets;
+      for (const conn of list) {
+        try { conn.send(msg); } catch (_) {}
+      }
+      return;
+    }
+
     for (const conn of this.peerConns) {
-      if (conn === excludeConn || !conn.open) continue;
+      if (conn === excludeConn || !conn.open || conn.label === 'pos') continue;
       try {
         conn.send(msg);
       } catch (_) {}
@@ -271,11 +306,19 @@ export class RealtimeNetwork {
   _handlePeerMessage(msg, sourceConn = null) {
     if (!msg || msg.from === this.playerId) return;
 
-    // Se l'host ha piu' peer connessi, inoltra i messaggi P2P agli altri peer
-    if (sourceConn && this.coopRole === 'host' && ['STATE', 'PAGE_EVENT', 'CHEST_OPENED', 'LEVEL_ADVANCE', 'BYE'].includes(msg.type)) {
-      for (const conn of this.peerConns) {
-        if (conn !== sourceConn && conn.open) {
-          try { conn.send(msg); } catch (_) {}
+    // Se l'host ha piu' peer connessi, inoltra i messaggi P2P agli altri peer sul canale giusto
+    if (sourceConn && this.coopRole === 'host') {
+      if (msg.type === 'STATE') {
+        for (const conn of this.peerConns) {
+          if (conn !== sourceConn && conn.open && conn.label === sourceConn.label) {
+            try { conn.send(msg); } catch (_) {}
+          }
+        }
+      } else if (['PAGE_EVENT', 'CHEST_OPENED', 'LEVEL_ADVANCE', 'BYE'].includes(msg.type)) {
+        for (const conn of this.peerConns) {
+          if (conn !== sourceConn && conn.open && conn.label !== 'pos') {
+            try { conn.send(msg); } catch (_) {}
+          }
         }
       }
     }
@@ -287,6 +330,11 @@ export class RealtimeNetwork {
     } else if (msg.type === 'FULL_SYNC') {
       this.handlers.onFullRoomSync?.(msg.snapshot);
     } else if (msg.type === 'STATE') {
+      const prev = this.remotePlayers.get(msg.state.id);
+      // Ignora pacchetti di posizione arrivati fuori ordine rispetto a seq piu' recenti
+      if (prev && typeof prev.seq === 'number' && typeof msg.state.seq === 'number' && msg.state.seq <= prev.seq) {
+        return;
+      }
       this.remotePlayers.set(msg.state.id, { ...msg.state, lastSeen: Date.now() });
       this.handlers.onPlayersUpdate?.(this.remotePlayers);
     } else if (msg.type === 'BYE') {
@@ -417,15 +465,33 @@ export class RealtimeNetwork {
   publishPlayerState(dt, player, spawnSlot = 'A') {
     if (this.coopRole === 'solo') return;
     this.syncAccum += dt;
-    if (this.syncAccum < 0.05) return;
+    const interval = this.mode === 'firebase' ? 0.065 : 0.033;
+    if (this.syncAccum < interval) return;
     this.syncAccum = 0;
+
+    const nowMs = Date.now();
+    let vx = 0;
+    let vz = 0;
+    if (this._prevPubPos && this._prevPubMs) {
+      const dtPub = Math.max(0.016, (nowMs - this._prevPubMs) / 1000);
+      if (dtPub < 0.35) {
+        vx = Math.max(-35, Math.min(35, (player.x - this._prevPubPos.x) / dtPub));
+        vz = Math.max(-35, Math.min(35, (player.z - this._prevPubPos.z) / dtPub));
+      }
+    }
+    this._prevPubPos = { x: player.x, z: player.z };
+    this._prevPubMs = nowMs;
+    this._stateSeq += 1;
 
     const payload = {
       id: this.playerId,
+      seq: this._stateSeq,
       name: player.name,
       spawnSlot,
       x: Number(player.x.toFixed(3)),
       z: Number(player.z.toFixed(3)),
+      vx: Number(vx.toFixed(2)),
+      vz: Number(vz.toFixed(2)),
       rotY: Number(player.rotY.toFixed(3)),
       hp: Math.round(player.hp),
       maxHp: Math.round(player.maxHp),
@@ -433,7 +499,7 @@ export class RealtimeNetwork {
       attacking: player.attackTimer > 0,
       alive: player.alive,
       pagesCount: player.collectedPages.length,
-      updatedAt: Date.now()
+      updatedAt: nowMs
     };
 
     if (this.mode === 'firebase' && this.fbDb) {
@@ -543,4 +609,67 @@ export class RealtimeNetwork {
     }
     this.remotePlayers.clear();
   }
+}
+
+/**
+ * Smoothing client-side + dead-reckoning breve per rendere fluido a 60/120 FPS
+ * il movimento di compagni ricevuti a ~30Hz su WebRTC/BroadcastChannel.
+ */
+export function stepInterpolatedPose(render, packet, dt) {
+  if (!packet) return render;
+  const px = Number(packet.x) || 0;
+  const pz = Number(packet.z) || 0;
+  const vx = Number(packet.vx) || 0;
+  const vz = Number(packet.vz) || 0;
+  const rot = Number(packet.rotY) || 0;
+  const seq = typeof packet.seq === 'number' ? packet.seq : null;
+
+  const jumpDist = render.initialized ? Math.hypot(px - render.x, pz - render.z) : 999;
+  if (!render.initialized || jumpDist > 6.5) {
+    render.initialized = true;
+    render.x = px;
+    render.z = pz;
+    render.rotY = rot;
+    render.targetX = px;
+    render.targetZ = pz;
+    render.vx = vx;
+    render.vz = vz;
+    render.rotTarget = rot;
+    render.lastSeq = seq;
+    render.sincePacket = 0;
+    return render;
+  }
+
+  const isNewPacket = seq !== null
+    ? seq !== render.lastSeq
+    : (px !== render.targetX || pz !== render.targetZ || rot !== render.rotTarget);
+
+  if (isNewPacket) {
+    render.targetX = px;
+    render.targetZ = pz;
+    render.vx = vx;
+    render.vz = vz;
+    render.rotTarget = rot;
+    render.lastSeq = seq;
+    render.sincePacket = 0;
+  } else {
+    render.sincePacket = Math.min(0.25, (render.sincePacket || 0) + dt);
+  }
+
+  if (dt > 0) {
+    const lookahead = Math.min(0.11, render.sincePacket);
+    const goalX = render.targetX + render.vx * lookahead;
+    const goalZ = render.targetZ + render.vz * lookahead;
+    const posAlpha = Math.min(1, 1 - Math.exp(-20 * dt));
+    render.x += (goalX - render.x) * posAlpha;
+    render.z += (goalZ - render.z) * posAlpha;
+
+    let dRot = (render.rotTarget - render.rotY) % (Math.PI * 2);
+    if (dRot > Math.PI) dRot -= Math.PI * 2;
+    if (dRot < -Math.PI) dRot += Math.PI * 2;
+    const rotAlpha = Math.min(1, 1 - Math.exp(-22 * dt));
+    render.rotY += dRot * rotAlpha;
+  }
+
+  return render;
 }

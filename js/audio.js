@@ -1,12 +1,13 @@
 // Audio procedurale Web Audio API + Musica di Sottofondo Egiziana in loop per Maze Royale
 
-const BGM_SRC = './assets/bgm-egyptian.mp3?v=13';
+const BGM_SRC = './assets/bgm-egyptian.mp3?v=14';
 const BGM_VOLUME = 0.24; // Bilanciato sotto gli effetti spada/scudo/portale
 
 class MazeAudio {
   constructor() {
     this.ctx = null;
     this.muted = false;
+    this.bgmMuted = false;
     this.bgm = null;
     this.bgmGain = null;
     this._bgmRouted = false;
@@ -15,7 +16,7 @@ class MazeAudio {
 
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && this._bgmDesired && !this.muted) {
+        if (document.visibilityState === 'visible' && this._bgmDesired && !this.muted && !this.bgmMuted) {
           this.ctx?.resume?.().catch(() => null);
           this._playBgmSafe();
         }
@@ -42,7 +43,7 @@ class MazeAudio {
     try {
       const source = this.ctx.createMediaElementSource(this.bgm);
       const gain = this.ctx.createGain();
-      gain.gain.value = this.muted ? 0 : BGM_VOLUME;
+      gain.gain.value = (this.muted || this.bgmMuted) ? 0 : BGM_VOLUME;
       source.connect(gain);
       gain.connect(this.ctx.destination);
       this.bgmGain = gain;
@@ -54,8 +55,9 @@ class MazeAudio {
 
   _playBgmSafe() {
     const el = this._ensureBgmElement();
-    if (!el || this.muted) return;
+    if (!el || this.muted || this.bgmMuted) return;
     if (!this._bgmRouted) el.volume = BGM_VOLUME;
+    el.muted = false;
     if (el.paused) {
       el.play().catch(() => null);
     }
@@ -63,20 +65,44 @@ class MazeAudio {
 
   startBgm() {
     this._bgmDesired = true;
-    this._playBgmSafe();
+    if (!this.bgmMuted && !this.muted) {
+      this._playBgmSafe();
+    }
+  }
+
+  isBgmMuted() {
+    return this.bgmMuted || this.muted;
+  }
+
+  setBgmMuted(muted) {
+    this.bgmMuted = Boolean(muted);
+    if (this.bgmGain) {
+      this.bgmGain.gain.value = (this.muted || this.bgmMuted) ? 0 : BGM_VOLUME;
+    } else if (this.bgm) {
+      this.bgm.volume = (this.muted || this.bgmMuted) ? 0 : BGM_VOLUME;
+    }
+    if (this.bgm) {
+      this.bgm.muted = this.muted || this.bgmMuted;
+      if (this.bgmMuted) {
+        this.bgm.pause?.();
+      } else if (this._bgmDesired && !this.muted) {
+        this.unlock();
+        this._playBgmSafe();
+      }
+    } else if (!this.bgmMuted && this._bgmDesired && !this.muted) {
+      this.unlock();
+      this._playBgmSafe();
+    }
+    return this.bgmMuted;
+  }
+
+  toggleBgmMuted() {
+    return this.setBgmMuted(!this.bgmMuted);
   }
 
   setMuted(muted) {
     this.muted = Boolean(muted);
-    if (this.bgmGain) {
-      this.bgmGain.gain.value = this.muted ? 0 : BGM_VOLUME;
-    } else if (this.bgm) {
-      this.bgm.volume = this.muted ? 0 : BGM_VOLUME;
-    }
-    if (this.bgm) {
-      this.bgm.muted = this.muted;
-      if (!this.muted && this._bgmDesired) this._playBgmSafe();
-    }
+    this.setBgmMuted(this.bgmMuted);
   }
 
   unlock() {

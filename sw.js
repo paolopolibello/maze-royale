@@ -1,4 +1,4 @@
-const CACHE_NAME = 'maze-royale-v13';
+const CACHE_NAME = 'maze-royale-v14';
 const ASSETS = [
   './',
   './index.html',

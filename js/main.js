@@ -6,7 +6,7 @@ import { PlayerCube, createXRayMaterial, getForwardAttackCenter } from './player
 import { WorldPage, LootChest, CenterDoor, EnemyBot } from './entities.js';
 import { GameControls } from './controls.js';
 import { isIlluminatedWithLoS } from './visibility.js';
-import { RealtimeNetwork } from './network.js';
+import { RealtimeNetwork, stepInterpolatedPose } from './network.js';
 import { loadFirebaseConfig, saveFirebaseConfig } from './firebase-config.js';
 import { audio } from './audio.js';
 
@@ -51,18 +51,35 @@ class RemotePlayerVisual {
     this.group.add(xray);
 
     this.group.visible = false;
+    this.smoothPose = {
+      initialized: false,
+      x: 0,
+      z: 0,
+      rotY: 0,
+      targetX: 0,
+      targetZ: 0,
+      vx: 0,
+      vz: 0,
+      rotTarget: 0,
+      lastSeq: null,
+      sincePacket: 0
+    };
     scene.add(this.group);
   }
 
-  sync(data, maze, localPlayer) {
+  sync(dt, data, maze, localPlayer) {
     if (!data || !data.alive) {
       this.group.visible = false;
+      this.smoothPose.initialized = false;
       return;
     }
-    const visible = localPlayer.alive && isIlluminatedWithLoS(maze, localPlayer.x, localPlayer.z, data.x, data.z, CONFIG.TORCH_RANGE);
+    stepInterpolatedPose(this.smoothPose, data, dt);
+    const sx = this.smoothPose.x;
+    const sz = this.smoothPose.z;
+    const visible = localPlayer.alive && isIlluminatedWithLoS(maze, localPlayer.x, localPlayer.z, sx, sz, CONFIG.TORCH_RANGE);
     this.group.visible = visible;
-    this.group.position.set(data.x, 0, data.z);
-    this.group.rotation.y = data.rotY || 0;
+    this.group.position.set(sx, 0, sz);
+    this.group.rotation.y = this.smoothPose.rotY;
     this.frontMat.color.setHex(data.shieldActive ? 0x38bdf8 : this.defaultFrontHex);
     this.slashMesh.visible = Boolean(data.attacking);
   }
@@ -85,6 +102,7 @@ class MazeRoyaleApp {
       btnMenuSingle: document.getElementById('btn-menu-single'),
       btnMenuCoop: document.getElementById('btn-menu-coop'),
       btnMenuMulti: document.getElementById('btn-menu-multi'),
+      btnMenuMusic: document.getElementById('btn-menu-music'),
       modalCoop: document.getElementById('modal-coop'),
       coopHostCode: document.getElementById('coop-host-code'),
       coopInviteLink: document.getElementById('coop-invite-link'),
@@ -102,10 +120,12 @@ class MazeRoyaleApp {
       btnVictoryRestart: document.getElementById('btn-victory-restart'),
       btnVictoryMenu: document.getElementById('btn-victory-menu'),
       hudTop: document.getElementById('hud-top'),
+      btnHudMusic: document.getElementById('btn-hud-music'),
       btnHudPause: document.getElementById('btn-hud-pause'),
       actionCluster: document.getElementById('action-cluster'),
       modalPause: document.getElementById('modal-pause'),
       btnPauseResume: document.getElementById('btn-pause-resume'),
+      btnPauseMusic: document.getElementById('btn-pause-music'),
       btnPauseRestart: document.getElementById('btn-pause-restart'),
       btnPauseMenu: document.getElementById('btn-pause-menu'),
       btnDeathMenu: document.getElementById('btn-death-menu'),
@@ -182,6 +202,7 @@ class MazeRoyaleApp {
     window.addEventListener('pagehide', () => this.network?.disconnect());
 
     audio.startBgm();
+    this._syncMusicUi();
 
     const isLocalHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
     if ('serviceWorker' in navigator && !isLocalHost) {
@@ -978,6 +999,30 @@ class MazeRoyaleApp {
     }, 2400);
   }
 
+  _toggleMusic() {
+    const muted = audio.toggleBgmMuted();
+    this._syncMusicUi();
+    this.showToast(muted ? '🔇 Musica disattivata' : '🔊 Musica attivata');
+  }
+
+  _syncMusicUi() {
+    const muted = audio.isBgmMuted();
+    const label = muted ? '🔇 MUSICA: OFF' : '🔊 MUSICA: ON';
+    if (this.el.btnMenuMusic) {
+      this.el.btnMenuMusic.textContent = label;
+      this.el.btnMenuMusic.classList.toggle('muted', muted);
+    }
+    if (this.el.btnPauseMusic) {
+      this.el.btnPauseMusic.textContent = label;
+      this.el.btnPauseMusic.classList.toggle('muted', muted);
+    }
+    if (this.el.btnHudMusic) {
+      this.el.btnHudMusic.textContent = muted ? '🔇' : '🔊';
+      this.el.btnHudMusic.classList.toggle('muted', muted);
+      this.el.btnHudMusic.title = muted ? 'Musica OFF (Tocca per attivare)' : 'Musica ON (Tocca per disattivare)';
+    }
+  }
+
   _bindModals() {
     const closeBtn = document.getElementById('btn-door-close');
     const clearBtn = document.getElementById('btn-door-clear');
@@ -999,6 +1044,7 @@ class MazeRoyaleApp {
     this.el.btnMenuSingle?.addEventListener('click', () => this.startSingleplayer());
     this.el.btnMenuCoop?.addEventListener('click', () => this.openCoopModal());
     this.el.btnMenuMulti?.addEventListener('click', () => this.openNetModal());
+    this.el.btnMenuMusic?.addEventListener('click', () => this._toggleMusic());
 
     this.el.btnCoopCopy?.addEventListener('click', () => {
       const code = this.el.coopHostCode?.textContent?.trim() || this.hostRoomCode;
@@ -1027,8 +1073,10 @@ class MazeRoyaleApp {
     });
     this.el.btnCoopClose?.addEventListener('click', () => this.closeCoopModal());
 
+    this.el.btnHudMusic?.addEventListener('click', () => this._toggleMusic());
     this.el.btnHudPause?.addEventListener('click', () => this.pauseGame());
     this.el.btnPauseResume?.addEventListener('click', () => this.resumeGame());
+    this.el.btnPauseMusic?.addEventListener('click', () => this._toggleMusic());
     this.el.btnPauseRestart?.addEventListener('click', () => this.restartArcadeRun());
     this.el.btnPauseMenu?.addEventListener('click', () => this.returnToMainMenu());
 
@@ -1417,7 +1465,7 @@ class MazeRoyaleApp {
     this.network.publishPlayerState(dt, this.player, this.spawnSide);
     for (const [pid, vis] of this.remoteVisuals.entries()) {
       const data = this.network.remotePlayers.get(pid);
-      vis.sync(data, this.maze, this.player);
+      vis.sync(dt, data, this.maze, this.player);
     }
 
     this._updateCamera(dt);
